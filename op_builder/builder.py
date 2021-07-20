@@ -31,6 +31,10 @@ if torch.__version__ >= '1.5':
 
 def installed_cuda_version():
     import torch.utils.cpp_extension
+    if is_rocm_pytorch: #in case of rocm return rocm version
+        print(f"Ashutosh : returning rocm version from here")
+        return 4,4
+    
     cuda_home = torch.utils.cpp_extension.CUDA_HOME
     assert cuda_home is not None, "CUDA_HOME does not exist, unable to compile CUDA op(s)"
     # Ensure there is not a cuda version mismatch between torch and nvcc compiler
