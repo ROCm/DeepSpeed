@@ -34,8 +34,8 @@ THE SOFTWARE.
 
 //#if __cplusplus
 #if __cplusplus && defined(__clang__) && defined(__HIP__)
-#include <hip/hcc_detail/hip_cooperative_groups_helper.h>
-#include <hip/hcc_detail/device_functions.h>
+#include <hip/amd_detail/hip_cooperative_groups_helper.h>
+#include <hip/amd_detail/device_functions.h>
 namespace cooperative_groups {
 
 /** \brief The base type of all cooperative group types
