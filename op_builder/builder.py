@@ -79,9 +79,9 @@ cuda_minor_mismatch_ok = {
 def assert_no_cuda_mismatch():
     cuda_major, cuda_minor = installed_cuda_version()
     sys_cuda_version = f'{cuda_major}.{cuda_minor}'
-    torch_cuda_version = ".".join(torch.version.cuda.split('.')[:2])
     print(f" Ashutosh : returning without asserting " )
     return
+    torch_cuda_version = ".".join(torch.version.cuda.split('.')[:2])
     # This is a show-stopping error, should probably not proceed past this
     if sys_cuda_version != torch_cuda_version:
         if (cuda_major in cuda_minor_mismatch_ok
