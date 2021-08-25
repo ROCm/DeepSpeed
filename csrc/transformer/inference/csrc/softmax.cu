@@ -38,7 +38,7 @@ __global__ void attn_softmax_v2(__half* vals,
                                 int iterations,
                                 int reduceWidth)
 {
-#if __CUDA_ARCH__ >= 700
+#if __CUDA_ARCH__ >= 700 || defined(__HIP_PLATFORM_HCC__)
 
     cg::thread_block b = cg::this_thread_block();
     cg::thread_block_tile<WARP_SIZE> g = cg::tiled_partition<WARP_SIZE>(b);
