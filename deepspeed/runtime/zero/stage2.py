@@ -198,6 +198,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
         #align nccl all-gather send buffers to 4-bye boundary
         self.nccl_start_alignment_factor = 2 # 4-byte alignment/sizeof(fp16) = 2
+ 
+        assert (allgather_bucket_size % self.nccl_start_alignment_factor == 0), f"allgather_bucket_size must be a multiple of nccl_start_alignment_factor, {self.nccl_start_alignment_factor} "
 
         partition_id = dist.get_rank(group=self.dp_process_group)
 
@@ -260,7 +262,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
             #divide the flat weights into near equal partition equal to the data parallel degree
             #each process will compute on a different part of the partition
             data_parallel_partitions = self.get_data_parallel_partitions(
-                self.fp16_groups_flat[i])
+                self.fp16_groups_flat[i], self.nccl_start_alignment_factor)
             self.parallel_partitioned_fp16_groups.append(data_parallel_partitions)
 
             # a partition of the fp32 master weights that will be updated by this process
@@ -273,11 +275,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
                 i].requires_grad = True  # keep this in case internal optimizer uses it
             param_group['params'] = [self.single_partition_of_fp32_groups[i]]
 
-            #partition_size = len(self.fp16_groups_flat[i]) / dist.get_world_size(
-            #    group=self.dp_process_group)
-            # HACK to figure out base_size (constant across partitions) from first dp
             partition_size = data_parallel_partitions[0].numel()
-            ##print("i ", i," PARTITION SIZE : ", partition_size, " FP16_GROUPS_FLAT ", len(self.fp16_groups_flat[i]) )
 
             params_in_partition, params_not_in_partition, first_offset = self.get_partition_info(
                 self.round_robin_fp16_groups[i],
@@ -461,7 +459,6 @@ class FP16_DeepSpeedZeroOptimizer(object):
                 int(self.partition_size[i]),
                 dtype=self.single_partition_of_fp32_groups[i].dtype,
                 device=self.device)
-            ##print("initialize_optimizer_states : ", i , " partition size " , self.partition_size[i])
             self.single_partition_of_fp32_groups[
                 i].grad = single_grad_partition.pin_memory(
                 ) if self.cpu_offload else single_grad_partition
@@ -1264,7 +1261,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
     #views the tensor as multiple partitions and returns
     #those partitions
-    def get_data_parallel_partitions(self, tensor):
+    def get_data_parallel_partitions(self, tensor, alignment_factor):
         partitions = []
 
         dp = dist.get_world_size(group=self.dp_process_group)
@@ -1272,24 +1269,18 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
         total_num_elements = tensor.numel()
 
-        round_divisor = dp*self.nccl_start_alignment_factor
-        ## ROUND does not work since all partitions have to be same size, by deepspeed design
-        ## round( total_num_elements / round_divisor ) using integers
-        #base_size = ( ( total_num_elements  + round_divisor//2 ) //round_divisor )
-        # ceil( total_num_elements / round_divisor ) using integers
+        round_divisor = dp*alignment_factor
         base_size = ( total_num_elements // round_divisor ) \
             + ( total_num_elements % round_divisor > 0)
-        base_size *= self.nccl_start_alignment_factor
+        base_size *= alignment_factor
 
-        start  = 0
+        start = 0
         for id in range(dp):
             partition_size = base_size
             if id == (dp-1):
                 partition_size -= ( base_size * dp - total_num_elements )
             partitions.append(tensor.narrow(0, start, partition_size))
-            ##print("get_data_parallel_partitions: ", start , " -> start + ", partition_size )
             start = start + partition_size
-         
         return partitions
 
     def get_partition_info(self, tensor_list, partition_size, partition_id):
@@ -1489,7 +1480,6 @@ class FP16_DeepSpeedZeroOptimizer(object):
         Not supporting closure.
         """
         self.micro_step_id = -1
-        ##torch._C._cuda_synchronize()
 
         if self.cpu_offload:
             torch.cuda.current_stream().wait_stream(self.migration_stream)
@@ -1498,8 +1488,6 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
         # First compute norm for all group so we know if there is overflow
         self.check_overflow()
-
-        ##torch._C._cuda_synchronize()
 
         OPTIMIZER_ALLGATHER = 'optimizer_allgather'
         OPTIMIZER_GRADIENTS = 'optimizer_gradients'
@@ -1615,12 +1603,6 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
             assert shard_size * num_shards <= partitioned_params[partition_id].numel()
 
-            #print("ALLGATHER:: partitioned_params[partition_id].numel() :: ", partitioned_params[partition_id].numel() )
-            #print("ALLGATHER:: Shard Size : ", shard_size)
-            #print("ALLGATHER:: Num Elements : ", num_elements)
-            #print("ALLGATHER:: Num Shards : ", num_shards)
-            #print("ALLGATHER:: DP World size : ", dp_world_size)
-            #torch._C._cuda_synchronize()
             for shard_id in range(num_shards):
 
                 if shard_id == (num_shards - 1):
@@ -1635,12 +1617,9 @@ class FP16_DeepSpeedZeroOptimizer(object):
                         num_elements).detach()
                     shard_list.append(curr_shard)
 
-                #print("ALLGATHER:: shard_id: ", shard_id , " shard_list : ", shard_list )
                 dist.all_gather(shard_list,
                                 shard_list[partition_id],
                                 group=self.dp_process_group)
-
-            #torch._C._cuda_synchronize()
         self.stop_timers([OPTIMIZER_ALLGATHER])
 
         # TODO: we probably don't need this? just to be safe
@@ -1887,8 +1866,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
             ]
             flat_merged_partitions = self.flatten_dense_tensors_aligned(
                 merged_partitions,
-                dist.get_world_size(group=self.dp_process_group))
-            dp_partitions = self.get_data_parallel_partitions(flat_merged_partitions)
+                self.nccl_start_alignment_factor * dist.get_world_size(group=self.dp_process_group))
+            dp_partitions = self.get_data_parallel_partitions(flat_merged_partitions, self.nccl_start_alignment_factor)
             merged_single_partition_of_fp32_groups.append(dp_partitions[partition_id])
 
         for current, saved in zip(self.single_partition_of_fp32_groups, merged_single_partition_of_fp32_groups):
@@ -1912,7 +1891,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
             flat_merged_partitions = self.flatten_dense_tensors_aligned(
                 all_partition_states,
                 alignment)
-            dp_partitions = self.get_data_parallel_partitions(flat_merged_partitions)
+            dp_partitions = self.get_data_parallel_partitions(flat_merged_partitions, 1)
             return dp_partitions[partition_id]
         else:
             # Assume non-tensor states are not partitioned and equal across ranks, so return first one
