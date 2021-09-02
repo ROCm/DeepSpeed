@@ -22,14 +22,25 @@ import warnings
 from setuptools import setup, find_packages
 import time
 
+torch_available = True
 try:
     import torch
     from torch.utils.cpp_extension import BuildExtension
 except ImportError:
-    raise ImportError('Unable to import torch, please visit https://pytorch.org/ '
-                      'to see how to properly install torch on your system.')
+    torch_available = False
+    print('[WARNING] Unable to import torch, pre-compiling ops will be disabled. ' \
+        'Please visit https://pytorch.org/ to see how to properly install torch on your system.')
 
 from op_builder import ALL_OPS, get_default_compute_capatabilities, is_rocm_pytorch
+
+RED_START = '\033[31m'
+RED_END = '\033[0m'
+ERROR = f"{RED_START} [ERROR] {RED_END}"
+
+
+def abort(msg):
+    print(f"{ERROR} {msg}")
+    assert False, msg
 
 
 def fetch_requirements(path):
@@ -48,7 +59,7 @@ extras_require = {
 }
 
 # If MPI is available add 1bit-adam requirements
-if torch.cuda.is_available():
+if torch_available and torch.cuda.is_available():
     if shutil.which('ompi_info') or shutil.which('mpiname'):
         if is_rocm_pytorch:
             cupy = "cupy"
@@ -66,12 +77,17 @@ extras_require['all'] = list(all_extras)
 cmdclass = {}
 
 # For any pre-installed ops force disable ninja
-cmdclass['build_ext'] = BuildExtension.with_options(use_ninja=False)
+if torch_available:
+    cmdclass['build_ext'] = BuildExtension.with_options(use_ninja=False)
 
-TORCH_MAJOR = torch.__version__.split('.')[0]
-TORCH_MINOR = torch.__version__.split('.')[1]
+if torch_available:
+    TORCH_MAJOR = torch.__version__.split('.')[0]
+    TORCH_MINOR = torch.__version__.split('.')[1]
+else:
+    TORCH_MAJOR = "0"
+    TORCH_MINOR = "0"
 
-if not torch.cuda.is_available():
+if torch_available and not torch.cuda.is_available():
     # Fix to allow docker builds, similar to https://github.com/NVIDIA/apex/issues/486
     print(
         "[WARNING] Torch did not find cuda available, if cross-compiling or running with cpu only "
@@ -87,6 +103,9 @@ BUILD_OP_PLATFORM = 1 if sys.platform == "win32" else 0
 BUILD_OP_DEFAULT = int(os.environ.get('DS_BUILD_OPS', BUILD_OP_PLATFORM))
 print(f"DS_BUILD_OPS={BUILD_OP_DEFAULT}")
 
+if BUILD_OP_DEFAULT:
+    assert torch_available, "Unable to pre-compile ops without torch installed. Please install torch before attempting to pre-compile ops."
+
 
 def command_exists(cmd):
     if sys.platform == "win32":
@@ -97,16 +116,29 @@ def command_exists(cmd):
         return result.wait() == 0
 
 
-def op_enabled(op_name):
+def op_envvar(op_name):
     assert hasattr(ALL_OPS[op_name], 'BUILD_VAR'), \
         f"{op_name} is missing BUILD_VAR field"
-    env_var = ALL_OPS[op_name].BUILD_VAR
+    return ALL_OPS[op_name].BUILD_VAR
+
+
+def op_enabled(op_name):
+    env_var = op_envvar(op_name)
     return int(os.environ.get(env_var, BUILD_OP_DEFAULT))
 
 
+compatible_ops = dict.fromkeys(ALL_OPS.keys(), False)
 install_ops = dict.fromkeys(ALL_OPS.keys(), False)
 for op_name, builder in ALL_OPS.items():
     op_compatible = builder.is_compatible()
+    compatible_ops[op_name] = op_compatible
+
+    # If op is requested but not available, throw an error
+    if op_enabled(op_name) and not op_compatible:
+        env_var = op_envvar(op_name)
+        if env_var not in os.environ:
+            builder.warning(f"One can disable {op_name} with {env_var}=0")
+        abort(f"Unable to pre-compile {op_name}")
 
     # If op is compatible update install reqs so it can potentially build/run later
     if op_compatible:
@@ -115,10 +147,9 @@ for op_name, builder in ALL_OPS.items():
 
     # If op install enabled, add builder to extensions
     if op_enabled(op_name) and op_compatible:
+        assert torch_available, f"Unable to pre-compile {op_name}, please first install torch"
         install_ops[op_name] = op_enabled(op_name)
         ext_modules.append(builder.builder())
-
-compatible_ops = {op_name: op.is_compatible() for (op_name, op) in ALL_OPS.items()}
 
 print(f'Install Ops={install_ops}')
 
@@ -178,9 +209,9 @@ torch_version = ".".join([TORCH_MAJOR, TORCH_MINOR])
 cuda_version = "0.0"
 # Set hip_version to 0.0 if cpu-only
 hip_version = "0.0"
-if torch.version.cuda is not None:
+if torch_available and torch.version.cuda is not None:
     cuda_version = ".".join(torch.version.cuda.split('.')[:2])
-if torch.version.hip is not None:
+if torch_available and torch.version.hip is not None:
     hip_version = ".".join(torch.version.hip.split('.')[:2])
 torch_info = {"version": torch_version, "cuda_version": cuda_version, "hip_version": hip_version}
 
