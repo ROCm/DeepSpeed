@@ -37,16 +37,21 @@ RUN cp /etc/ssh/sshd_config ${STAGE_DIR}/sshd_config && \
     sed "0,/^#Port 22/s//Port 22/" ${STAGE_DIR}/sshd_config > /etc/ssh/sshd_config
 
 ##############################################################################
-# Mellanox OFED
+# Mellanox OFED    
+#     MLNX_OFED link may need to be updated if OS version is changed
+#     The following commands only supports ubuntu18.04
 ##############################################################################
-#ENV MLNX_OFED_VERSION=4.6-1.0.1.1
-#RUN apt-get install -y libnuma-dev
-#RUN cd ${STAGE_DIR} && \
-#    wget -q -O - http://www.mellanox.com/downloads/ofed/MLNX_OFED-${MLNX_OFED_VERSION}/MLNX_OFED_LINUX-${MLNX_OFED_VERSION}-ubuntu18.04-x86_64.tgz | tar xzf - && \
-#    cd MLNX_OFED_LINUX-${MLNX_OFED_VERSION}-ubuntu18.04-x86_64 && \
-#    ./mlnxofedinstall --user-space-only --without-fw-update --all -q && \
-#    cd ${STAGE_DIR} && \
-#    rm -rf ${STAGE_DIR}/MLNX_OFED_LINUX-${MLNX_OFED_VERSION}-ubuntu18.04-x86_64*
+ENV ofed_version="5.3-1.0.5.0"
+RUN cd ${STAGE_DIR} && \
+    wget http://content.mellanox.com/ofed/MLNX_OFED-"${ofed_version}"/MLNX_OFED_LINUX-"${ofed_version}"-ubuntu18.04-x86_64.tgz
+RUN tar -xvf MLNX_OFED_LINUX-"${ofed_version}"-ubuntu18.04-x86_64.tgz
+RUN cd MLNX_OFED_LINUX-"${ofed_version}"-ubuntu18.04-x86_64/DEBS
+RUN dpkg -i ibverbs-providers_52mlnx1-1.53105_amd64.deb \
+    libibverbs1_52mlnx1-1.53105_amd64.deb
+    dpkg -i infiniband-diags_52mlnx1-1.53105_amd64.deb \
+    libibnetdisc5_52mlnx1-1.53105_amd64.deb \
+    libibmad5_52mlnx1-1.53105_amd64.deb \
+    libibumad3_52mlnx1-1.53105_amd64.deb
 
 ##############################################################################
 # OPENMPI
