@@ -44,7 +44,7 @@ if TORCH_MAJOR > 1 or (TORCH_MAJOR == 1 and TORCH_MINOR >= 5):
     is_rocm_pytorch = True if ((torch.version.hip is not None) and (ROCM_HOME is not None)) else False
 
 if is_rocm_pytorch:
-    with open('/opt/rocm/.info/version', 'r') as file:
+    with open('/opt/venv/lib/python3.13/site-packages/_rocm_sdk_devel/.info/version', 'r') as file:
         ROCM_VERSION_DEV_RAW = file.read()
     ROCM_MAJOR = ROCM_VERSION_DEV_RAW.split('.')[0]
     ROCM_MINOR = ROCM_VERSION_DEV_RAW.split('.')[1]
