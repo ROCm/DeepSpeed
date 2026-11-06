@@ -106,6 +106,73 @@ def assert_no_cuda_mismatch(name=""):
     return True
 
 
+def _cxx_std_from_torch_config():
+    """Return -std=c++NN from torch.__config__ CXX_FLAGS when present."""
+    try:
+        import re
+        import torch
+        cfg = torch.__config__.show()
+    except Exception:
+        return None
+    for line in cfg.splitlines():
+        if "CXX_FLAGS" not in line and "CMAKE_CXX_FLAGS" not in line:
+            continue
+        matches = re.findall(r"-std=(?:gnu\+\+|c\+\+)(\d+)", line)
+        if matches:
+            return f"-std=c++{matches[-1]}"
+    return None
+
+
+def _aten_compiles_with(std):
+    """True if ATen headers compile with the given -std=c++NN value."""
+    import os
+    import subprocess
+    import tempfile
+    compiler = os.environ.get("CXX") or "c++"
+    try:
+        from torch.utils.cpp_extension import include_paths
+        try:
+            incs = include_paths()
+        except TypeError:
+            incs = include_paths(cuda=False)
+    except Exception:
+        return False
+    src = "#include <ATen/ATen.h>\nint main() { return 0; }\n"
+    with tempfile.TemporaryDirectory() as td:
+        src_path = os.path.join(td, "aten_std_check.cpp")
+        with open(src_path, "w") as f:
+            f.write(src)
+        cmd = [compiler, f"-std={std}", "-c", src_path, "-o", os.path.join(td, "a.o")]
+        for inc in incs:
+            cmd.extend(["-I", inc])
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except Exception:
+            return False
+
+
+def get_host_cxx_std_flag():
+    """Match Linux host cxx to libtorch (same idea as xformers fix/linux-cxx-cpp20-rocm-30321).
+
+    Override with DS_CXX_STD=17|20|23|26. Default C++17; use C++20+ if ATen/torch require it.
+    """
+    import os
+    override = os.environ.get("DS_CXX_STD", "").strip().lower()
+    if override:
+        digits = "".join(c for c in override if c.isdigit()) or "17"
+        return f"-std=c++{digits}"
+
+    from_torch = _cxx_std_from_torch_config()
+    if from_torch:
+        return from_torch
+
+    for std in ("c++17", "c++20", "c++23", "c++26"):
+        if _aten_compiles_with(std):
+            return f"-std={std}"
+    return "-std=c++17"
+
+
 class OpBuilder(ABC):
     _rocm_version = None
     _rocm_gpu_arch = None
@@ -272,10 +339,9 @@ class OpBuilder(ABC):
         rocm_wavefront_size_cmd = str(
             rocm_info) + " | grep -Eo -m1 'Wavefront Size:[[:space:]]+[0-9]+' | grep -Eo '[0-9]+'"
         try:
-            safe_cmd = shlex.split(rocm_wavefront_size_cmd)
-            result = subprocess.check_output(rocm_wavefront_size_cmd)
+            result = subprocess.check_output(rocm_wavefront_size_cmd, shell=True)
             rocm_wavefront_size = result.decode('utf-8').strip()
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, FileNotFoundError):
             rocm_wavefront_size = "32"
         OpBuilder._rocm_wavefront_size = rocm_wavefront_size
         return OpBuilder._rocm_wavefront_size
@@ -752,7 +818,8 @@ class CUDAOpBuilder(OpBuilder):
         if sys.platform == "win32":
             return ['-O2']
         else:
-            return ['-O3', '-std=c++17', '-g', '-Wno-reorder']
+            # Follow libtorch: C++17 default; C++20+ when torch/ATen require it (ROCM-30321).
+            return ['-O3', get_host_cxx_std_flag(), '-g', '-Wno-reorder']
 
     def nvcc_args(self):
         if self.build_for_cpu:
@@ -761,7 +828,8 @@ class CUDAOpBuilder(OpBuilder):
         if self.is_rocm_pytorch():
             ROCM_MAJOR, ROCM_MINOR = self.installed_rocm_version()
             args += [
-                '-std=c++17', '-U__HIP_NO_HALF_OPERATORS__', '-U__HIP_NO_HALF_CONVERSIONS__',
+                # Follow libtorch host/device cxx std (ROCM-30321; mirrors xformers cpp20 fix).
+                get_host_cxx_std_flag(), '-U__HIP_NO_HALF_OPERATORS__', '-U__HIP_NO_HALF_CONVERSIONS__',
                 '-U__HIP_NO_HALF2_OPERATORS__',
                 '-DROCM_VERSION_MAJOR=%s' % ROCM_MAJOR,
                 '-DROCM_VERSION_MINOR=%s' % ROCM_MINOR
